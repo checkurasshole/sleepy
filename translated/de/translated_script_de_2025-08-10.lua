@@ -47,7 +47,7 @@ local characterNames = {
 }
 
 local Window = Fluent:CreateWindow({
-    Title = "COMBO_DOCHT-DOMINATOR - OPT...",
+    Title = "COMBO_DOCHT",
     SubTitle = "Verzögerungsfreie Leistung",
     TabWidth = 180,
     Size = UDim2.fromOffset(650, 520),
