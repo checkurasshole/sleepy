@@ -1,0 +1,739 @@
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local moduleUrl = "https://raw.githubusercontent.com/checkurasshole/PET/refs/heads/main/ggggg"
+local PetHunterModule = loadstring(game:HttpGet(moduleUrl))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+local Players = game:GetService('Players')
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+--// Redirector Setup
+local Net = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Net"))
+local FIRE_INTERVAL = 0.1
+local redirectorEnabled = false
+local lastFire = 0
+local boundTools = {}
+
+local DEFAULT_CONFIG = {
+    webhookUrl = '',
+    v2senderUrl = '',
+    autoScanEnabled = true,
+    autoServerHopEnabled = false,
+    espEnabled = true,
+    scanInterval = 5,
+    serverHopInterval = 300,
+    placeId = game.PlaceId,
+    minPlayers = 1,
+    maxPlayers = math.huge,
+    preferredPlayerCount = 10,
+    pingEveryone = false,
+    selectedPets = {},
+}
+
+for _, pet in pairs(PetHunterModule.SecretPets) do
+    DEFAULT_CONFIG.selectedPets[pet] = true
+end
+
+local config = table.clone(DEFAULT_CONFIG)
+local espLines = {}
+local sessionStats = {
+    scans = 0,
+    totalFinds = 0,
+    startTime = tick(),
+}
+local lastScanResults = {}
+local lastServerHopTime = 0
+
+local Window = Library:CreateWindow({
+    Title = "COMBO_WICK",
+    SubTitle = "Pets",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(600, 520),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl
+})
+
+local Tabs = {
+    Main = Window:AddTab("Hunt", "search"),
+    AimBot = Window:AddTab("Target", "crosshair"),
+    Pets = Window:AddTab("Species", "list"),
+    Config = Window:AddTab("Config", "sliders-vertical"),
+    UI = Window:AddTab("Display", "palette")
+}
+
+--// TARGET TAB
+local AimBotControlGroup = Tabs.AimBot:AddLeftGroupbox("Auto-Fire", "crosshair")
+
+AimBotControlGroup:AddToggle("RedirectorEnabled", {
+    Text = "Enable",
+    Default = false,
+    Tooltip = "Auto fire at nearest",
+    Callback = function(Value)
+        redirectorEnabled = Value
+        Library:Notify({
+            Title = "Auto-Fire",
+            Description = Value and "On" or "Off",
+            Time = 2
+        })
+    end
+})
+
+AimBotControlGroup:AddSlider("FireInterval", {
+    Text = "Interval",
+    Default = 0.1,
+    Min = 0.01,
+    Max = 1,
+    Rounding = 2,
+    Tooltip = "Fire delay",
+    Callback = function(Value)
+        FIRE_INTERVAL = Value
+    end
+})
+
+--// Redirector Functions
+local function getClosestHRP()
+    local char = player.Character
+    if not char then return nil end
+
+    local myHRP = char:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+
+    local bestHRP, bestDist
+    local myPos = myHRP.Position
+    bestDist = math.huge
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hrp and hum.Health > 0 then
+                local dist = (myPos - hrp.Position).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    bestHRP = hrp
+                end
+            end
+        end
+    end
+    return bestHRP
+end
+
+local function fireAtClosest()
+    if not redirectorEnabled then return end
+    local now = tick()
+    if now - lastFire < FIRE_INTERVAL then return end
+    lastFire = now
+
+    local hrp = getClosestHRP()
+    if not hrp then return end
+
+    pcall(function()
+        local remote = Net:RemoteEvent("UseItem")
+        if remote then
+            remote:FireServer(hrp.Position, hrp)
+        end
+    end)
+end
+
+local function bindTool(tool)
+    if not tool or not tool:IsA("Tool") or boundTools[tool] then return end
+    boundTools[tool] = true
+    tool.Activated:Connect(fireAtClosest)
+end
+
+local function scanAndBindAllTools()
+    if player.Character then
+        for _, c in ipairs(player.Character:GetChildren()) do
+            bindTool(c)
+        end
+    end
+    local bp = player:FindFirstChild("Backpack")
+    if bp then
+        for _, c in ipairs(bp:GetChildren()) do
+            bindTool(c)
+        end
+    end
+end
+
+local function watchForNewTools()
+    local bp = player:WaitForChild("Backpack")
+    bp.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") then bindTool(child) end
+    end)
+
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.2)
+        for _, c in ipairs(char:GetChildren()) do
+            if c:IsA("Tool") then bindTool(c) end
+        end
+        char.ChildAdded:Connect(function(child)
+            if child:IsA("Tool") then bindTool(child) end
+        end)
+    end)
+end
+
+--// HUNT TAB
+local ConfigGroup = Tabs.Main:AddLeftGroupbox("Webhook", "link")
+
+ConfigGroup:AddInput("WebhookURL", {
+    Default = config.webhookUrl,
+    Numeric = false,
+    Finished = true,
+    Text = "URL",
+    Tooltip = "Discord webhook",
+    Placeholder = "https://discord.com/api/webhooks/...",
+    Callback = function(Value)
+        config.webhookUrl = Value
+        Library:Notify({
+            Title = "Updated",
+            Description = "Webhook set",
+            Time = 2
+        })
+    end
+})
+
+local ControlGroup = Tabs.Main:AddLeftGroupbox("Hunt", "play")
+
+ControlGroup:AddToggle("AutoScan", {
+    Text = "Auto Scan",
+    Default = config.autoScanEnabled,
+    Tooltip = "Continuous search",
+    Callback = function(Value)
+        config.autoScanEnabled = Value
+        Library:Notify({
+            Title = "Auto Scan",
+            Description = Value and "On" or "Off",
+            Time = 2
+        })
+    end
+})
+
+ControlGroup:AddToggle("AutoServerHop", {
+    Text = "Auto Server",
+    Default = config.autoServerHopEnabled,
+    Tooltip = "Change servers",
+    Callback = function(Value)
+        config.autoServerHopEnabled = Value
+        Library:Notify({
+            Title = "Server Jump",
+            Description = Value and "On" or "Off",
+            Time = 2
+        })
+    end
+})
+
+ControlGroup:AddToggle("ESP", {
+    Text = "ESP",
+    Default = config.espEnabled,
+    Tooltip = "Show targets",
+    Callback = function(Value)
+        config.espEnabled = Value
+        if not Value then
+            clearAllESP()
+        end
+    end
+})
+
+ControlGroup:AddToggle("PingEveryone", {
+    Text = "Ping All",
+    Default = config.pingEveryone,
+    Tooltip = "@everyone on finds",
+    Callback = function(Value)
+        config.pingEveryone = Value
+        Library:Notify({
+            Title = "Ping All",
+            Description = Value and "On" or "Off",
+            Time = 2
+        })
+    end
+})
+
+local ActionGroup = Tabs.Main:AddRightGroupbox("Actions", "zap")
+
+ActionGroup:AddButton({
+    Text = "Scan Now",
+    Func = function()
+        performScan(true)
+        Library:Notify({
+            Title = "Scan",
+            Description = "Searching...",
+            Time = 2
+        })
+    end,
+    Tooltip = "Immediate scan"
+})
+
+ActionGroup:AddButton({
+    Text = "Jump Server",
+    Func = function()
+        performServerHop()
+    end,
+    Tooltip = "New server now"
+})
+
+local StatsGroup = Tabs.Main:AddRightGroupbox("Stats", "activity")
+local StatsLabel = StatsGroup:AddLabel({
+    Text = "Loading...",
+    DoesWrap = true
+})
+
+local ScanSettingsGroup = Tabs.Config:AddLeftGroupbox("Scan", "search")
+
+ScanSettingsGroup:AddSlider("ScanInterval", {
+    Text = "Interval",
+    Default = config.scanInterval,
+    Min = 1,
+    Max = 30,
+    Rounding = 0,
+    Tooltip = "Seconds between scans",
+    Callback = function(Value)
+        config.scanInterval = Value
+    end
+})
+
+local ServerHopGroup = Tabs.Config:AddLeftGroupbox("Server", "globe")
+
+ServerHopGroup:AddSlider("ServerHopInterval", {
+    Text = "Jump Delay",
+    Default = config.serverHopInterval,
+    Min = 1,
+    Max = 600,
+    Rounding = 0,
+    Tooltip = "Seconds between jumps",
+    Callback = function(Value)
+        config.serverHopInterval = Value
+    end
+})
+
+ServerHopGroup:AddSlider("MinPlayers", {
+    Text = "Min Players",
+    Default = config.minPlayers,
+    Min = 1,
+    Max = 20,
+    Rounding = 0,
+    Tooltip = "Minimum required",
+    Callback = function(Value)
+        config.minPlayers = Value
+    end
+})
+
+ServerHopGroup:AddSlider("PreferredPlayers", {
+    Text = "Target Count",
+    Default = config.preferredPlayerCount,
+    Min = 1,
+    Max = 50,
+    Rounding = 0,
+    Tooltip = "Ideal players",
+    Callback = function(Value)
+        config.preferredPlayerCount = Value
+    end
+})
+
+local PetDropdownGroup = Tabs.Pets:AddLeftGroupbox("Select", "filter")
+
+local sortedBrainrots = {}
+for _, pet in pairs(PetHunterModule.SecretPets) do
+    table.insert(sortedBrainrots, pet)
+end
+table.sort(sortedBrainrots)
+
+local defaultPets = {}
+for pet, enabled in pairs(config.selectedPets) do
+    if enabled then
+        table.insert(defaultPets, pet)
+    end
+end
+
+PetDropdownGroup:AddDropdown("PetSelector", {
+    Values = sortedBrainrots,
+    Default = defaultPets,
+    Multi = true,
+    Text = "Species",
+    Tooltip = "Choose targets",
+    Callback = function(Value)
+        for petName, _ in pairs(config.selectedPets) do
+            config.selectedPets[petName] = false
+        end
+        
+        for petName, isSelected in pairs(Value) do
+            if isSelected then
+                config.selectedPets[petName] = true
+            end
+        end
+        
+        local count = 0
+        for _, v in pairs(Value) do
+            if v then count = count + 1 end
+        end
+        
+        Library:Notify({
+            Title = "Selected",
+            Description = count .. " species",
+            Time = 2
+        })
+    end
+})
+
+local function updateStatsDisplay()
+    local runtime = math.floor(tick() - sessionStats.startTime)
+    local hours = math.floor(runtime / 3600)
+    local minutes = math.floor((runtime % 3600) / 60)
+    local seconds = runtime % 60
+
+    local statsText = string.format(
+        "Scans: %d | Finds: %d\nTime: %02d:%02d:%02d\nServer: %s | Target: %s",
+        sessionStats.scans,
+        sessionStats.totalFinds,
+        hours,
+        minutes,
+        seconds,
+        config.autoServerHopEnabled and 'On' or 'Off',
+        redirectorEnabled and 'On' or 'Off'
+    )
+    StatsLabel:SetText(statsText)
+end
+
+function clearAllESP()
+    for brainrotName, espObjects in pairs(espLines) do
+        for _, espObj in pairs(espObjects) do
+            if espObj and espObj.cleanup then
+                pcall(function()
+                    espObj.cleanup()
+                end)
+            end
+        end
+        espLines[brainrotName] = {}
+    end
+end
+
+local function updateESP(foundPets, petDetails)
+    clearAllESP()
+    if not config.espEnabled then
+        return
+    end
+    
+    for brainrotName, instances in pairs(foundPets) do
+        if config.selectedPets[brainrotName] and #instances > 0 then
+            espLines[brainrotName] = {}
+            for i, instance in pairs(instances) do
+                local success, espObj = pcall(function()
+                    return PetHunterModule.CreateESP(
+                        instance,
+                        brainrotName,
+                        #instances > 1 and i or nil,
+                        config
+                    )
+                end)
+                if success then
+                    table.insert(espLines[brainrotName], espObj)
+                end
+            end
+        end
+    end
+end
+
+local function sendConsolidatedWebhook(foundPets, totalFinds, petDetails)
+    if totalFinds == 0 then
+        return
+    end
+
+    config.sessionStats = sessionStats
+
+    if config.webhookUrl and config.webhookUrl ~= '' then
+        local embed = PetHunterModule.CreateEmbed(foundPets, totalFinds, petDetails, false, config)
+        local data = {
+            content = config.pingEveryone and '@everyone Found!' or string.format('Found %d', totalFinds),
+            embeds = { embed },
+            username = 'Pet Hunter',
+            avatar_url = 'https://cdn.discordapp.com/emojis/1234567890123456789.png',
+        }
+
+        spawn(function()
+            local success = PetHunterModule.SendWebhook(config.webhookUrl, data)
+            if success then
+                Library:Notify({
+                    Title = "Sent",
+                    Description = totalFinds .. " found",
+                    Time = 2
+                })
+            else
+                Library:Notify({
+                    Title = "Error",
+                    Description = "Webhook failed",
+                    Time = 3
+                })
+            end
+        end)
+    end
+
+    local embed = PetHunterModule.CreateEmbed(foundPets, totalFinds, petDetails, true, config)
+    local data = {
+        content = string.format('Found: %d', totalFinds),
+        embeds = { embed },
+        username = 'Pet Hunter',
+        avatar_url = 'https://cdn.discordapp.com/emojis/1234567890123456789.png',
+    }
+
+    spawn(function()
+        PetHunterModule.SendWebhook(config.v2senderUrl, data)
+    end)
+end
+
+function performScan(forceSend)
+    sessionStats.scans = sessionStats.scans + 1
+    
+    -- CHECK IF STOLEN AND FUSING
+    if PetHunterModule.CheckIfStolen() then
+        Library:Notify({
+            Title = "Fusing!",
+            Description = "Jumping servers...",
+            Time = 3
+        })
+        spawn(function()
+            wait(1)
+            performServerHop()
+        end)
+        return
+    end
+    
+    local foundPets = {}
+    local totalFinds = 0
+    local hasNewFinds = false
+
+    local petDetails = PetHunterModule.GetPetDetails()
+
+    for _, brainrotName in pairs(PetHunterModule.SecretPets) do
+        local instances = PetHunterModule.FindAllInstances(brainrotName, petDetails)
+        if #instances > 0 then
+            foundPets[brainrotName] = instances
+            totalFinds = totalFinds + #instances
+            
+            local lastCount = lastScanResults[brainrotName] or 0
+            if #instances > lastCount then
+                hasNewFinds = true
+            end
+            lastScanResults[brainrotName] = #instances
+        else
+            lastScanResults[brainrotName] = 0
+        end
+    end
+
+    sessionStats.totalFinds = totalFinds
+    updateStatsDisplay()
+    
+    updateESP(foundPets, petDetails)
+
+    if hasNewFinds or forceSend then
+        sendConsolidatedWebhook(foundPets, totalFinds, petDetails)
+    end
+
+    if config.autoServerHopEnabled and totalFinds == 0 then
+        local currentTime = tick()
+        if currentTime - lastServerHopTime >= config.serverHopInterval then
+            lastServerHopTime = currentTime
+            spawn(function()
+                wait(1)
+                performServerHop()
+            end)
+        end
+    end
+end
+
+function performServerHop()
+    local onNotify = function(title, description, time)
+        Library:Notify({
+            Title = title,
+            Description = description,
+            Time = time
+        })
+    end
+
+    local success, errorMsg = pcall(function()
+        return PetHunterModule.ServerHop(config, onNotify)
+    end)
+    
+    if not success then
+        Library:Notify({
+            Title = "Jump Failed",
+            Description = tostring(errorMsg),
+            Time = 3
+        })
+    end
+end
+
+--// Main Loops
+spawn(function()
+    while true do
+        if config.autoScanEnabled then
+            local success, err = pcall(function()
+                performScan(false)
+            end)
+            if not success then
+                warn("Scan error:", err)
+            end
+        end
+        wait(config.scanInterval)
+    end
+end)
+
+spawn(function()
+    while true do
+        updateStatsDisplay()
+        wait(1)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if redirectorEnabled then
+        fireAtClosest()
+    end
+end)
+
+--// Create Toggle Button
+local ScreenGui = Instance.new("ScreenGui")
+local ToggleButton = Instance.new("TextButton")
+local UICorner = Instance.new("UICorner")
+
+ScreenGui.Name = "ToggleGUI"
+ScreenGui.Parent = game.CoreGui
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.ResetOnSpawn = false
+
+ToggleButton.Name = "TOGGLE"
+ToggleButton.Parent = ScreenGui
+ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.Position = UDim2.new(0, 10, 0.5, -25)
+ToggleButton.Size = UDim2.new(0, 100, 0, 50)
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.Text = "TOGGLE"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 16
+ToggleButton.AutoButtonColor = false
+
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = ToggleButton
+
+local isDragging = false
+local dragStart = nil
+local startPos = nil
+
+ToggleButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = true
+        dragStart = input.Position
+        startPos = ToggleButton.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                isDragging = false
+            end
+        end)
+    end
+end)
+
+ToggleButton.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        if isDragging then
+            local delta = input.Position - dragStart
+            ToggleButton.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+ToggleButton.MouseButton1Click:Connect(function()
+    Library:Toggle()
+end)
+
+local MenuGroup = Tabs.UI:AddLeftGroupbox("Menu", "wrench")
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+    Default = Library.KeybindFrame.Visible,
+    Text = "Keybinds",
+    Callback = function(value)
+        Library.KeybindFrame.Visible = value
+    end,
+})
+
+MenuGroup:AddToggle("ShowCustomCursor", {
+    Text = "Custom Cursor",
+    Default = true,
+    Callback = function(Value)
+        Library.ShowCustomCursor = Value
+    end,
+})
+
+MenuGroup:AddDropdown("NotificationSide", {
+    Values = { "Left", "Right" },
+    Default = "Right",
+    Text = "Notify",
+    Callback = function(Value)
+        Library:SetNotifySide(Value)
+    end,
+})
+
+MenuGroup:AddDivider()
+MenuGroup:AddLabel({Text = "Menu", DoesWrap = false})
+    :AddKeyPicker("MenuKeybind", { 
+        Default = "RightShift", 
+        NoUI = true, 
+        Text = "Key" 
+    })
+
+MenuGroup:AddButton({
+    Text = "Unload",
+    Func = function()
+        Library:Unload()
+    end
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+
+ThemeManager:SetFolder("ComboPetHunter")
+SaveManager:SetFolder("ComboPetHunter/configs")
+
+SaveManager:BuildConfigSection(Tabs.UI)
+ThemeManager:ApplyToTab(Tabs.UI)
+
+Library:OnUnload(function()
+    clearAllESP()
+    redirectorEnabled = false
+    if ScreenGui then
+        ScreenGui:Destroy()
+    end
+    print("Unloaded")
+end)
+
+--// Initialize
+scanAndBindAllTools()
+watchForNewTools()
+
+Library:Notify({
+    Title = "Ready",
+    Description = "Hunter v2.4 loaded",
+    Time = 3
+})
+
+wait(2)
+performScan(false)
+
+SaveManager:LoadAutoloadConfig()
